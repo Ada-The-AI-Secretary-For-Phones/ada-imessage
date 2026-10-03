@@ -1,0 +1,61 @@
+name: PR-Agent review
+
+# Open-source PR reviewer (github.com/The-PR-Agent/pr-agent) running Kimi K3 on Bedrock.
+# AWS access is keyless: GitHub OIDC assumes github-pr-agent-bedrock, a role that can only
+# invoke Kimi K3 and only from this org's pull_request events or default branches.
+# Comment /review, /improve, /describe or /ask "<question>" on a PR to run a tool by hand.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event.comment.id || 'auto' }}
+  cancel-in-progress: true
+
+jobs:
+  pr_agent:
+    # Automatic runs skip drafts and fork heads. Manual runs need a slash command from
+    # someone with write access, so a drive-by comment cannot spend Bedrock tokens.
+    if: >-
+      github.event.sender.type != 'Bot' && (
+        (github.event_name == 'pull_request'
+          && !github.event.pull_request.draft
+          && github.event.pull_request.head.repo.full_name == github.repository)
+        || (github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && startsWith(github.event.comment.body, '/')
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::202731947691:role/github-pr-agent-bedrock
+          role-session-name: pr-agent-${{ github.run_id }}
+          aws-region: us-east-2
+
+      - uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7 # 0.46.0-github_action
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_REGION_NAME: us-east-2
+          config.model: bedrock/us.moonshotai.kimi-k3
+          config.fallback_models: '[]'
+          # Kimi K3 rejects the temperature field; reasoning mode drops it.
+          config.custom_reasoning_model: "true"
+          config.custom_model_max_tokens: "128000"
+          config.max_model_tokens: "100000"
+          config.ai_timeout: "300"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_improve: "true"
+          # PR bodies here are written by hand; /describe stays available on demand.
+          github_action_config.auto_describe: "false"
